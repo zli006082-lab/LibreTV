@@ -296,9 +296,9 @@ function buildHlsConfig() {
         enableWorker: true,
         lowLatencyMode: false,
         backBufferLength: lowResource ? 60 : 120,
-        maxBufferLength: lowResource ? 120 : 300,
-        maxMaxBufferLength: lowResource ? 300 : 600,
-        maxBufferSize: lowResource ? 150 * 1000 * 1000 : 300 * 1000 * 1000,
+        maxBufferLength: lowResource ? 480 : 600,
+        maxMaxBufferLength: lowResource ? 480 : 600,
+        maxBufferSize: lowResource ? 250 * 1000 * 1000 : 400 * 1000 * 1000,
         maxBufferHole: 0.5,
         highBufferWatchdogPeriod: 1,
         nudgeOffset: 0.2,
@@ -2477,6 +2477,43 @@ function initPlayer(videoUrl) {
                     updateHlsQualityControl();
                     tryStartPlayback();
                 });
+
+                // ---- 缓存体量看门狗（保守版）----
+                // 目的：缓冲时长放大到 10 分钟后，长时间挂着页面内存会持续涨。
+                // 这里只用浏览器标准的 <video>.buffered 判断“已缓冲到多远”，
+                // 不依赖 hls.js 的内部接口，避免不同版本报错。
+                // 逻辑：已缓冲时长超过 12 分钟时，把播放器拉回“当前时间附近”重新起播余量，
+                //      从而释放掉身后多余的已解码数据。只影响越界后的极端情况，正常播放不触发。
+                try {
+                    if (typeof hls.on === 'function') {
+                        const BUFFER_HARD_LIMIT_SEC = 720; // 12 分钟
+                        if (!hls._bufferWatchdog) {
+                            hls._bufferWatchdog = setInterval(function () {
+                                try {
+                                    if (currentHls !== hls) { clearInterval(hls._bufferWatchdog); hls._bufferWatchdog = null; return; }
+                                    const v = art && art.video;
+                                    if (!v || !v.buffered || !v.buffered.length) return;
+                                    const cur = Number(v.currentTime || 0);
+                                    let aheadSec = 0;
+                                    for (let i = 0; i < v.buffered.length; i++) {
+                                        const s = v.buffered.start(i);
+                                        const e = v.buffered.end(i);
+                                        if (e >= cur && s <= cur) { aheadSec = e - cur; break; }
+                                        if (s > cur && (aheadSec === 0 || s - cur < aheadSec)) { aheadSec = e - cur; }
+                                    }
+                                    if (aheadSec > BUFFER_HARD_LIMIT_SEC) {
+                                        // 缓冲过厚：把播放位置往前挪一点点，触发播放器重建近端缓冲，释放远端旧数据
+                                        try { v.currentTime = cur + 0.01; } catch (e) { }
+                                    }
+                                } catch (e) {
+                                    // 看门狗自身绝不能影响播放
+                                }
+                            }, 15000);
+                        }
+                    }
+                } catch (e) {
+                    // 任何异常都静默忽略，保证播放不受影响
+                }
 
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     // 增加错误计数
